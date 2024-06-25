@@ -32,7 +32,7 @@ test = [
 ]
 
 [project.urls]
-Homepage = ""
+Homepage = "https://github.com/appolloford/chatbot_kernel"
 
 [tool.hatch.version]
 path = "chatbot_kernel/__init__.py"
