@@ -40,31 +40,6 @@ class ChatbotKernel(Kernel):
             device_map = 'auto',
         )
 
-    def chat(self, message):
-        """Send message with chat history to LLM and return new response"""
-        if self.model is None:
-            raise ValueError("Model has not been initialized!")
-
-        self.conversation.append({"role": "user", "content": message})
-        input_ids = self.tokenizer.apply_chat_template(
-            self.conversation,
-            add_generation_prompt=True,
-            return_tensors="pt"
-        ).to(self.model.device)
-
-        outputs = self.model.generate(
-            input_ids,
-            max_new_tokens=256,
-            eos_token_id=self.terminators,
-            do_sample=True,
-            temperature=0.6,
-            top_p=0.9,
-        )
-        response = outputs[0][input_ids.shape[-1]:]
-        response = self.tokenizer.decode(response, skip_special_tokens=True)
-        self.conversation.append({"role": "assistant", "content": response})
-        return response
-
     def do_execute(self, code, silent, store_history=True, user_expressions=None,
                    allow_stdin=False):
         try:
@@ -96,19 +71,55 @@ class ChatbotKernel(Kernel):
 
 
     def handle_chat(self, code, silent):
-        if not silent:
-            response = self.chat(code)
-            display_content = {
-                'data': {
-                    'text/markdown': response
-                },
-                'metadata': {}
-            }
-            self.send_response(self.iopub_socket, 'display_data', display_content)
-            # stream_content = {'name': 'stdout', 'text': response}
-            # self.send_response(self.iopub_socket, 'stream', stream_content)
+        if self.model is None:
+            raise ValueError("Model has not been initialized!")
 
-            # clear_output(wait=True)
+        if not silent:
+            self.conversation.append({"role": "user", "content": code})
+            input_ids = self.tokenizer.apply_chat_template(
+                self.conversation,
+                add_generation_prompt=True,
+                return_tensors="pt"
+            ).to(self.model.device)
+
+            generated = input_ids
+            start = input_ids.shape[-1]
+            while 1:
+                outputs = self.model.generate(
+                    generated,
+                    max_new_tokens=8,
+                    eos_token_id=self.terminators,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    do_sample=True,
+                    # use_cache=True,
+                    temperature=0.6,
+                    top_p=0.9,
+                )
+
+                tokens = outputs[0][start:]
+                start += len(tokens)
+                generated = outputs
+
+                tokens = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                stream_content = {'name': 'stdout', 'text': tokens}
+                self.send_response(self.iopub_socket, 'stream', stream_content)
+
+                if outputs[0, -1] == self.tokenizer.eos_token_id:
+                    break
+
+        response = outputs[0][input_ids.shape[-1]:]
+        response = self.tokenizer.decode(response, skip_special_tokens=True)
+        self.conversation.append({"role": "assistant", "content": response})
+
+        self.send_response(self.iopub_socket, 'clear_output', {'wait': True})
+        display_content = {
+            'data': {
+                'text/markdown': response
+            },
+            'metadata': {},
+            'transient': {'display_id': f'markdown_output_{self.execution_count}'}
+        }
+        self.send_response(self.iopub_socket, 'display_data', display_content)
 
     def handle_magic(self, code, silent):
         # Drop the leading '%'
