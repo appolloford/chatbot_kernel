@@ -1,3 +1,4 @@
+import os
 import traceback
 import accelerate
 import torch
@@ -21,8 +22,10 @@ class ChatbotKernel(Kernel):
         self.model_id = None
         self.model = None
         self.conversation = []
+        self.cache_dir = os.getenv("HF_HOME", None)
 
     def _init_llm(self):
+        """Initialize a LLM for use"""
         if self.model_id is None:
             raise ValueError("Model ID is not provided!")
 
@@ -38,6 +41,7 @@ class ChatbotKernel(Kernel):
         )
 
     def chat(self, message):
+        """Send message with chat history to LLM and return new response"""
         if self.model is None:
             raise ValueError("Model has not been initialized!")
 
@@ -64,36 +68,21 @@ class ChatbotKernel(Kernel):
     def do_execute(self, code, silent, store_history=True, user_expressions=None,
                    allow_stdin=False):
         try:
-            if code.startswith("%load"):
-                self.model_id = code.lstrip("%load").strip()
-                self._init_llm()
-    
-            elif code.startswith("%newchat"):
-                # remove all conversation except the system message
-                self.conversation = [message for message in self.conversation if message.get("role") == "system"]
+            lines = code.split("\n")
+            for line in lines:
+                if line.strip().startswith('%'):
+                    self.handle_magic(line, silent)
 
-            # Only valid for llama model
-            # elif code.startswith("%system"):
-            #     self.conversation = [{"role": "system", "content": code.lstrip("%system").strip()}]
+                else:
+                    self.handle_chat(line, silent)
 
-            elif not silent:
-                response = self.chat(code)
-                display_content = {
-                    'data': {
-                        'text/markdown': response
-                    },
-                    'metadata': {}
-                }
-                self.send_response(self.iopub_socket, 'display_data', display_content)
-                # stream_content = {'name': 'stdout', 'text': chat(code)}
-                # self.send_response(self.iopub_socket, 'stream', stream_content)
-    
             return {'status': 'ok',
                     # The base class increments the execution count
                     'execution_count': self.execution_count,
                     'payload': [],
                     'user_expressions': {},
                    }
+
         except Exception as e:
             error_content = {
                 'ename': str(type(e)),
@@ -104,3 +93,64 @@ class ChatbotKernel(Kernel):
             return {'status': 'error', 'execution_count': self.execution_count,
                     'ename': error_content['ename'], 'evalue': error_content['evalue'],
                     'traceback': error_content['traceback']}
+
+
+    def handle_chat(self, code, silent):
+        if not silent:
+            response = self.chat(code)
+            display_content = {
+                'data': {
+                    'text/markdown': response
+                },
+                'metadata': {}
+            }
+            self.send_response(self.iopub_socket, 'display_data', display_content)
+            # stream_content = {'name': 'stdout', 'text': response}
+            # self.send_response(self.iopub_socket, 'stream', stream_content)
+
+            # clear_output(wait=True)
+
+    def handle_magic(self, code, silent):
+        # Drop the leading '%'
+        commands = code[1:].split()
+        if len(commands) == 1:
+            magic_command = commands[0]
+        else:
+            magic_command, *magic_argv = commands
+
+        if magic_command == "load":
+            self.model_id = magic_argv[0]
+            self._init_llm()
+
+        elif magic_command == "new_chat":
+            # clean any chat history
+            self.conversation = []
+
+        elif magic_command == "hf_home":
+            self.cache_dir = magic_argv[0]
+
+        elif magic_command == "model_list":
+            if not silent:
+                # default cache_dir
+                default_home = os.path.join(os.path.expanduser("~"), ".cache")
+                HF_HOME = os.path.expanduser(
+                    os.getenv(
+                        "HF_HOME",
+                        os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"),
+                    )
+                )
+                cache_dir = self.cache_dir or HF_HOME
+                models = os.listdir(os.path.join(cache_dir, 'hub'))
+                output = "\n - ".join([m.replace("models--", "") for m in models if m.startswith("models")])
+                output = f"Available models:\n - {output}"
+                display_content = {
+                    'data': {
+                        'text/markdown': output
+                    },
+                    'metadata': {}
+                }
+                self.send_response(self.iopub_socket, 'display_data', display_content)
+
+        else:
+            raise ValueError(f"Unknown magic keyword: {magic_command}")
+
