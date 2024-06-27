@@ -43,12 +43,13 @@ class ChatbotKernel(Kernel):
                    allow_stdin=False):
         try:
             lines = code.split("\n")
-            for line in lines:
+            for lidx, line in enumerate(lines):
                 if line.strip().startswith('%'):
                     self.handle_magic(line, silent)
-
                 else:
-                    self.handle_chat(line, silent)
+                    # Combine the rest as a single message if no more magics in the front
+                    self.handle_chat("\n".join(lines[lidx:]), silent)
+                    break
 
             return {'status': 'ok',
                     # The base class increments the execution count
