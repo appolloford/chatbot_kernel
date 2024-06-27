@@ -1,6 +1,5 @@
 import os
 import traceback
-import accelerate
 import torch
 from ipykernel.kernelbase import Kernel
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -152,7 +151,7 @@ class ChatbotKernel(Kernel):
                 )
                 cache_dir = self.cache_dir or HF_HOME
                 models = os.listdir(os.path.join(cache_dir, 'hub'))
-                output = "\n - ".join([m.replace("models--", "") for m in models if m.startswith("models")])
+                output = "\n - ".join(["/".join(m.split('--')[1:]) for m in models if m.startswith("models")])
                 output = f"Available models:\n - {output}"
                 display_content = {
                     'data': {
