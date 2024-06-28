@@ -2,10 +2,20 @@
 A Jupyter kernel to use Jupyter as a chat window, running downloaded LLMs locally.
 
 ## Installation
-This kernel can be install from PyPI
+This kernel package can be install from PyPI
 ```
 $ pip install chatbot_kernel
 ```
+
+Once the package installed, the kernel spec can be installed to home directory by command:
+```
+$ python -m chatbot_kernel install --user
+```
+If you are using virtualenv, do
+```
+$ python -m chatbot_kernel install --sys-prefix
+```
+instead.
 
 If you install the package to a virtual environment, you may need to set up `JUPYTER_PATH=/path/to/venv/share/jupyter:$JUPYTER_PATH` so that jupyter can find the kernel
 
