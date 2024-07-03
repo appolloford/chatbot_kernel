@@ -47,23 +47,8 @@ class ChatbotKernel(Kernel):
             },
         }
 
-    def _init_llm(self):
-        """Initialize a LLM for use"""
-        if self.model_id is None:
-            raise ValueError("Model ID is not provided!")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-        self.terminators = [
-            self.tokenizer.eos_token_id,
-            self.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-        ]
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
-
     def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
+        """Execute user code. Inherit from `ipykernel.kernelbase.Kernel`."""
         try:
             lines = code.split("\n")
             for lidx, line in enumerate(lines):
@@ -98,10 +83,12 @@ class ChatbotKernel(Kernel):
             }
 
     def handle_chat(self, code, silent):
+        """Handle input for normal chat."""
         if self.model is None:
             raise ValueError("Model has not been initialized!")
 
         if not silent:
+            # Append new user input into conversation
             self.conversation.append({"role": "user", "content": code})
             input_ids = self.tokenizer.apply_chat_template(
                 self.conversation, add_generation_prompt=True, return_tensors="pt"
@@ -110,6 +97,7 @@ class ChatbotKernel(Kernel):
             generated = input_ids
             start = input_ids.shape[-1]
             while 1:
+                # Request new tokens until LLM stop generating
                 outputs = self.model.generate(
                     generated,
                     max_new_tokens=8,
@@ -125,6 +113,7 @@ class ChatbotKernel(Kernel):
                 start += len(tokens)
                 generated = outputs
 
+                # Streaming output
                 tokens = self.tokenizer.decode(tokens, skip_special_tokens=True)
                 stream_content = {"name": "stdout", "text": tokens}
                 self.send_response(self.iopub_socket, "stream", stream_content)
@@ -132,11 +121,15 @@ class ChatbotKernel(Kernel):
                 if outputs[0, -1] == self.tokenizer.eos_token_id:
                     break
 
+        # Append the chatbot response into conversation
         response = outputs[0][input_ids.shape[-1]:]
         response = self.tokenizer.decode(response, skip_special_tokens=True)
         self.conversation.append({"role": "assistant", "content": response})
 
+        # Clean the plain text stream output
         self.send_response(self.iopub_socket, "clear_output", {"wait": True})
+
+        # Re-render the response in markdown
         display_content = {
             "data": {"text/markdown": response},
             "metadata": {},
@@ -144,7 +137,20 @@ class ChatbotKernel(Kernel):
         }
         self.send_response(self.iopub_socket, "display_data", display_content)
 
+    def handle_magic(self, code, silent):
+        """Handle magic commands."""
+        # Drop the leading '%'
+        commands = code[1:].split()
+        magic_command, *magic_argv = commands
+
+        if magic_command in self.magic_commands.keys():
+            action = self.magic_commands.get(magic_command).get("action")
+            action(*magic_argv)
+        else:
+            raise ValueError(f"Unknown magic keyword: {magic_command}")
+
     def handle_help_magic(self):
+        """Handle `%help` magic command."""
         help_table_row = [
             "<table style='border-collapse: collapse; width: 100%;'>",
             "<colgroup><col style='width: 20%'><col style='width: 80%'></colgroup>",
@@ -166,18 +172,35 @@ class ChatbotKernel(Kernel):
         self.send_response(self.iopub_socket, "display_data", display_content)
 
     def handle_load_magic(self, *args):
+        """Handle `%load` magic command."""
         self.model_id = args[0]
-        self._init_llm()
+
+        if self.model_id is None:
+            raise ValueError("Model ID is not provided!")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+        self.terminators = [
+            self.tokenizer.eos_token_id,
+            self.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
+        ]
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        )
 
     def handle_new_chat_magic(self):
-        # clean any chat history
+        """Handle `%new_chat` magic command."""
+        # Clean any chat history
         self.conversation = []
 
     def handle_hf_home_magic(self, *args):
+        """Handle `%hf_home` magic command."""
         self.cache_dir = args[0]
 
     def handle_model_list_magic(self):
-        # default cache_dir
+        """Handle `%model_list` magic command."""
+        # Get default cache_dir
         default_home = os.path.join(os.path.expanduser("~"), ".cache")
         HF_HOME = os.path.expanduser(
             os.getenv(
@@ -185,20 +208,12 @@ class ChatbotKernel(Kernel):
                 os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"),
             )
         )
+
         cache_dir = self.cache_dir or HF_HOME
+
+        # Parse directories in the cache_dir
         models = os.listdir(os.path.join(cache_dir, "hub"))
         output = "\n - ".join(["/".join(m.split("--")[1:]) for m in models if m.startswith("models")])
         output = f"Available models:\n - {output}"
         display_content = {"data": {"text/markdown": output}, "metadata": {}}
         self.send_response(self.iopub_socket, "display_data", display_content)
-
-    def handle_magic(self, code, silent):
-        # Drop the leading '%'
-        commands = code[1:].split()
-        magic_command, *magic_argv = commands
-
-        if magic_command in self.magic_commands.keys():
-            action = self.magic_commands.get(magic_command).get("action")
-            action(*magic_argv)
-        else:
-            raise ValueError(f"Unknown magic keyword: {magic_command}")
