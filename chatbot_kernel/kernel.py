@@ -188,7 +188,7 @@ class ChatbotKernel(Kernel):
             }
             self.send_response(self.iopub_socket, "display_data", display_content)
         elif args[0] == "temperature":
-            self.temperature = args[1]
+            self.temperature = float(args[1])
         elif args[0] == "dtype":
             if args[1] not in self.dtype_mapping.keys():
                 raise ValueError(f"Invalid dtype. Choose one from {self.dtype_mapping.keys()}")
