@@ -23,28 +23,41 @@ class ChatbotKernel(Kernel):
         self.model = None
         self.conversation = []
         self.cache_dir = os.getenv("HF_HOME", None)
+        self.dtype = "bfloat16"
+        self.temperature = 0.6
+
+        self.dtype_mapping = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+            "float64": torch.float64,
+        }
 
         self.magic_commands = {
             "help": {
                 "description": "Show this help message",
-                "action": self.handle_help_magic,
+                "action": self._handle_help_magic,
             },
             "load": {
                 "description": "Load a pre-trained model to start chatting",
-                "action": self.handle_load_magic,
+                "action": self._handle_load_magic,
             },
             "new_chat": {
                 "description": "Start a new chat",
-                "action": self.handle_new_chat_magic,
+                "action": self._handle_new_chat_magic,
             },
             "hf_home": {
                 "description": "Set the path to models, override <code>HF_HOME</code> from the environment",
-                "action": self.handle_hf_home_magic,
+                "action": self._handle_hf_home_magic,
             },
             "model_list": {
                 "description": "List all available models",
-                "action": self.handle_model_list_magic,
+                "action": self._handle_model_list_magic,
             },
+            "config": {
+                "description": "Set advanced configuration. `%config help` to see options",
+                "action": self._handle_config,
+            }
         }
 
     def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
@@ -53,10 +66,10 @@ class ChatbotKernel(Kernel):
             lines = code.split("\n")
             for lidx, line in enumerate(lines):
                 if line.strip().startswith("%"):
-                    self.handle_magic(line, silent)
+                    self._handle_magic(line)
                 else:
                     # Combine the rest as a single message if no more magics in the front
-                    self.handle_chat("\n".join(lines[lidx:]), silent)
+                    self._handle_chat("\n".join(lines[lidx:]), silent)
                     break
 
             return {
@@ -82,8 +95,13 @@ class ChatbotKernel(Kernel):
                 "traceback": error_content["traceback"],
             }
 
-    def handle_chat(self, code, silent):
-        """Handle input for normal chat."""
+    def _handle_chat(self, code, silent):
+        """Handle input for normal chat. Invoked by `do_execute`
+        
+        Args:
+            code (str): Input text
+            silent (bool): If True, send response back to the cell
+        """
         if self.model is None:
             raise ValueError("Model has not been initialized!")
 
@@ -105,7 +123,7 @@ class ChatbotKernel(Kernel):
                     pad_token_id=self.tokenizer.eos_token_id,
                     do_sample=True,
                     # use_cache=True,
-                    temperature=0.6,
+                    temperature=self.temperature,
                     top_p=0.9,
                 )
 
@@ -137,8 +155,51 @@ class ChatbotKernel(Kernel):
         }
         self.send_response(self.iopub_socket, "display_data", display_content)
 
-    def handle_magic(self, code, silent):
-        """Handle magic commands."""
+    def _handle_config(self, *args):
+        """Handle `%config` magic command. Invoked by `_handle_magic`
+        
+        Args:
+            args (list): Target option and value
+        """
+        help_options = {
+            "help": "Show this option table",
+            "temperature": "The creativity of LLMs. Default: 0.6",
+            "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16",
+        }
+
+        if args[0] == "help":
+            help_message = "Usage: %config \<option\> \<value\>"
+            help_table_row = [
+                "<table style='border-collapse: collapse; width: 100%;'>",
+                "<colgroup><col style='width: 20%'><col style='width: 80%'></colgroup>",
+                "<tr><th>Options</th>",
+                "<th>Description</th></tr>",
+            ]
+
+            for option, desc in help_options.items():
+                help_table_row.append(f"<tr><td style='text-align: left;'>{option}</td>")
+                help_table_row.append(f"<td style='text-align: left;'>{desc}</td></tr>")
+
+            help_table_row.append("</table>")
+            help_message = "\n".join([help_message, *help_table_row])
+            display_content = {
+                "data": {"text/markdown": help_message},
+                "metadata": {},
+            }
+            self.send_response(self.iopub_socket, "display_data", display_content)
+        elif args[0] == "temperature":
+            self.temperature = args[1]
+        elif args[0] == "dtype":
+            if args[1] not in self.dtype_mapping.keys():
+                raise ValueError(f"Invalid dtype. Choose one from {self.dtype_mapping.keys()}")
+            self.dtype = args[1]
+
+    def _handle_magic(self, code):
+        """Handle magic commands. Invoked by `do_execute`
+        
+        Args:
+            code (str): plain text of magic command and its arguments
+        """
         # Drop the leading '%'
         commands = code[1:].split()
         magic_command, *magic_argv = commands
@@ -149,8 +210,8 @@ class ChatbotKernel(Kernel):
         else:
             raise ValueError(f"Unknown magic keyword: {magic_command}")
 
-    def handle_help_magic(self):
-        """Handle `%help` magic command."""
+    def _handle_help_magic(self):
+        """Handle `%help` magic command. Invoked by `_handle_magic`"""
         help_table_row = [
             "<table style='border-collapse: collapse; width: 100%;'>",
             "<colgroup><col style='width: 20%'><col style='width: 80%'></colgroup>",
@@ -171,8 +232,12 @@ class ChatbotKernel(Kernel):
         }
         self.send_response(self.iopub_socket, "display_data", display_content)
 
-    def handle_load_magic(self, *args):
-        """Handle `%load` magic command."""
+    def _handle_load_magic(self, *args):
+        """Handle `%load` magic command. Invoked by `_handle_magic`
+        
+        Args:
+            args (list): The model to be loaded. Only use the first position
+        """
         self.model_id = args[0]
 
         if self.model_id is None:
@@ -185,21 +250,26 @@ class ChatbotKernel(Kernel):
         ]
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=self.dtype_mapping.get(self.dtype),
             device_map="auto",
+            # local_files_only=True,  # doesn't work? use TRANSFORMERS_OFFLINE=true
         )
 
-    def handle_new_chat_magic(self):
-        """Handle `%new_chat` magic command."""
+    def _handle_new_chat_magic(self):
+        """Handle `%new_chat` magic command. Invoked by `_handle_magic`"""
         # Clean any chat history
         self.conversation = []
 
-    def handle_hf_home_magic(self, *args):
-        """Handle `%hf_home` magic command."""
+    def _handle_hf_home_magic(self, *args):
+        """Handle `%hf_home` magic command. Invoked by `_handle_magic`
+        
+        Args:
+            args (list): The target HF_HOME path. Only use the first position
+        """
         self.cache_dir = args[0]
 
-    def handle_model_list_magic(self):
-        """Handle `%model_list` magic command."""
+    def _handle_model_list_magic(self):
+        """Handle `%model_list` magic command. Invoked by `_handle_magic`"""
         # Get default cache_dir
         default_home = os.path.join(os.path.expanduser("~"), ".cache")
         HF_HOME = os.path.expanduser(

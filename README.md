@@ -21,10 +21,12 @@ If you install the package to a virtual environment, you may need to set up `JUP
 
 ## Usage
 A few magics are available in the kernel:
-- `%load`: load a pretrained LLM
-- `%hf_home`: set the path to find downloaded LLMs, similar to set `HF_HOME` environment variable
-- `%model_list`: show the available LLMs
-- `%new_chat`: clean up the chat history
+- `%help`: Print help messages
+- `%config`: Set advanced configuration. See more in `%config help`
+- `%load`: Load a pretrained LLM
+- `%hf_home`: Set the path to find downloaded LLMs, similar to set `HF_HOME` environment variable
+- `%model_list`: Show the available LLMs
+- `%new_chat`: Clean up the chat history
 
 Before start chatting, you need to at least download a model from [HuggingFace](https://huggingface.co/docs/hub/models-downloading). For example, `huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct`.
 Once models are downloaded, launch a jupyter notebook/lab and execute `%load <model>` and start chatting. Here is an example:
