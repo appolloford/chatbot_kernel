@@ -4,6 +4,71 @@ import torch
 from ipykernel.kernelbase import Kernel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+class ChatbotKernelConfig:
+    def __init__(self):
+        self._dtype = torch.bfloat16
+        self._temperature = 0.6
+        self._n_predict = 1000
+        self._n_new_tokens = 8
+
+    @classmethod
+    def _attributes(cls):
+        return [a for a in cls.__dict__.keys() if not a.startswith("_")]
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @dtype.setter
+    def dtype(self, dtype_str):
+        dtype_mapping = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+            "float64": torch.float64,
+        }
+        if dtype_str not in dtype_mapping.keys():
+            raise ValueError(f"Invalid dtype. Choose one from {dtype_mapping.keys()}")
+        self._dtype = dtype_mapping.get(dtype_str)
+
+    @property
+    def temperature(self):
+        return self._temperature
+
+    @temperature.setter
+    def temperature(self, temp):
+        try:
+            temp = float(temp)
+            if temp < 0 or temp > 1:
+                raise ValueError("`temperature` must be a float between 0 and 1, but `{temp}` is got.")
+            self._temperature = temp
+        except:
+            raise TypeError(f"`temperature` must be a float between 0 and 1, but `{temp}` is got.")
+
+    @property
+    def n_predict(self):
+        return self._n_predict
+
+    @n_predict.setter
+    def n_predict(self, n_pred):
+        try:
+            n_pred = int(n_pred)
+            self._n_predict = n_pred
+        except:
+            raise TypeError(f"`n_predict` must be a integer, but `{n_pred}` is got.")
+
+    @property
+    def n_new_tokens(self):
+        return self._n_new_tokens
+
+    @n_new_tokens.setter
+    def n_new_tokens(self, n_tokens):
+        try:
+            n_tokens = int(n_tokens)
+            self._n_new_tokens = n_tokens
+        except:
+            raise TypeError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
+
 
 class ChatbotKernel(Kernel):
     implementation = "Chatbot"
@@ -23,16 +88,8 @@ class ChatbotKernel(Kernel):
         self.model = None
         self.conversation = []
         self.cache_dir = os.getenv("HF_HOME", None)
-        self.dtype = "bfloat16"
-        self.temperature = 0.6
 
-        self.dtype_mapping = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-            "float64": torch.float64,
-        }
-
+        self.chatbot_config = ChatbotKernelConfig()
         self.magic_commands = {
             "help": {
                 "description": "Show this help message",
@@ -57,7 +114,7 @@ class ChatbotKernel(Kernel):
             "config": {
                 "description": "Set advanced configuration. `%config help` to see options",
                 "action": self._handle_config,
-            }
+            },
         }
 
     def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
@@ -97,13 +154,16 @@ class ChatbotKernel(Kernel):
 
     def _handle_chat(self, code, silent):
         """Handle input for normal chat. Invoked by `do_execute`
-        
+
         Args:
             code (str): Input text
             silent (bool): If True, send response back to the cell
         """
         if self.model is None:
-            raise ValueError("Model has not been initialized!")
+            raise ValueError(
+                "Model has not been initialized! Use `%load` to load a model before starting chat. "
+                "Check more options in `%help`"
+            )
 
         if not silent:
             # Append new user input into conversation
@@ -114,16 +174,19 @@ class ChatbotKernel(Kernel):
 
             generated = input_ids
             start = input_ids.shape[-1]
-            while 1:
+            count = 0
+            n_predict = self.chatbot_config.n_predict
+            while n_predict == -1 or count < n_predict:
+                count += 1
                 # Request new tokens until LLM stop generating
                 outputs = self.model.generate(
                     generated,
-                    max_new_tokens=8,
+                    max_new_tokens=self.chatbot_config.n_new_tokens,
                     eos_token_id=self.terminators,
                     pad_token_id=self.tokenizer.eos_token_id,
                     do_sample=True,
                     # use_cache=True,
-                    temperature=self.temperature,
+                    temperature=self.chatbot_config.temperature,
                     top_p=0.9,
                 )
 
@@ -157,7 +220,7 @@ class ChatbotKernel(Kernel):
 
     def _handle_config(self, *args):
         """Handle `%config` magic command. Invoked by `_handle_magic`
-        
+
         Args:
             args (list): Target option and value
         """
@@ -165,9 +228,14 @@ class ChatbotKernel(Kernel):
             "help": "Show this option table",
             "temperature": "The creativity of LLMs. Default: 0.6",
             "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16",
+            "n_predict": "The max number of token prediction. If -1, the response only stop when no more tokens are "
+                         "generated. Default: 1000",
+            "n_new_tokens": "The number of new tokens printed on the screen at one time. "\
+                            "`n_new_tokens` * `n_predict` will be the max length of one response. Default: 8"
         }
 
-        if args[0] == "help":
+        config_key, *config_value = args
+        if config_key == "help":
             help_message = "Usage: %config \<option\> \<value\>"
             help_table_row = [
                 "<table style='border-collapse: collapse; width: 100%;'>",
@@ -187,16 +255,20 @@ class ChatbotKernel(Kernel):
                 "metadata": {},
             }
             self.send_response(self.iopub_socket, "display_data", display_content)
-        elif args[0] == "temperature":
-            self.temperature = float(args[1])
-        elif args[0] == "dtype":
-            if args[1] not in self.dtype_mapping.keys():
-                raise ValueError(f"Invalid dtype. Choose one from {self.dtype_mapping.keys()}")
-            self.dtype = args[1]
+        elif config_key in self.chatbot_config._attributes():
+            if len(config_value) == 0:
+                raise RuntimeError(f"Keyword {config_key} is provided but value is not provided")
+            elif len(config_value) > 1:
+                raise RuntimeError(f"To many values {config_value} for {config_key}")
+
+            config_value = config_value[0]
+            setattr(self.chatbot_config, config_key, config_value)
+        else:
+            raise ValueError(f"Unknow config keyword: {config_key}")
 
     def _handle_magic(self, code):
         """Handle magic commands. Invoked by `do_execute`
-        
+
         Args:
             code (str): plain text of magic command and its arguments
         """
@@ -208,7 +280,7 @@ class ChatbotKernel(Kernel):
             action = self.magic_commands.get(magic_command).get("action")
             action(*magic_argv)
         else:
-            raise ValueError(f"Unknown magic keyword: {magic_command}")
+            raise MagicError(f"Unknown magic keyword: {magic_command}. Please check `%help`")
 
     def _handle_help_magic(self):
         """Handle `%help` magic command. Invoked by `_handle_magic`"""
@@ -234,7 +306,7 @@ class ChatbotKernel(Kernel):
 
     def _handle_load_magic(self, *args):
         """Handle `%load` magic command. Invoked by `_handle_magic`
-        
+
         Args:
             args (list): The model to be loaded. Only use the first position
         """
@@ -250,9 +322,9 @@ class ChatbotKernel(Kernel):
         ]
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
-            torch_dtype=self.dtype_mapping.get(self.dtype),
+            torch_dtype=self.dtype_mapping.get(self.chatbot_config.dtype),
             device_map="auto",
-            # local_files_only=True,  # doesn't work? use TRANSFORMERS_OFFLINE=true
+            # local_files_only=True,
         )
 
     def _handle_new_chat_magic(self):
@@ -262,7 +334,7 @@ class ChatbotKernel(Kernel):
 
     def _handle_hf_home_magic(self, *args):
         """Handle `%hf_home` magic command. Invoked by `_handle_magic`
-        
+
         Args:
             args (list): The target HF_HOME path. Only use the first position
         """
