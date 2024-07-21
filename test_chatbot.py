@@ -37,24 +37,70 @@ class ChatbotKernelTests(jkt.KernelTests):
         model_names = ["/".join(m.split("--")[1:]) for m in models if m.startswith("models")]
         return model_names
 
+    def test_config_dtype(self):
+        self.flush_channels()
+        reply, output = self.execute_helper(code="%config dtype float16")
+        self.assertEqual(reply['content']['status'], 'ok')
+        self.assertEqual(output, [])
+        reply, output = self.execute_helper(code="%config dtype 16")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+        self.assertIn('Invalid dtype', output[0]['content']['evalue'])
+
+    def test_config_n_predict(self):
+        self.flush_channels()
+        reply, output = self.execute_helper(code="%config n_predict 100")
+        self.assertEqual(reply['content']['status'], 'ok')
+        self.assertEqual(output, [])
+        reply, output = self.execute_helper(code="%config n_predict abc")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+
+    def test_config_n_new_tokens(self):
+        self.flush_channels()
+        reply, output = self.execute_helper(code="%config n_new_tokens 100")
+        self.assertEqual(reply['content']['status'], 'ok')
+        self.assertEqual(output, [])
+        reply, output = self.execute_helper(code="%config n_new_tokens abc")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+
+    def test_config_temperature(self):
+        self.flush_channels()
+        reply, output = self.execute_helper(code="%config temperature 0.1")
+        self.assertEqual(reply['content']['status'], 'ok')
+        self.assertEqual(output, [])
+        reply, output = self.execute_helper(code="%config temperature 10")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+        reply, output = self.execute_helper(code="%config temperature abc")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+
+    def test_config_undefined(self):
+        self.flush_channels()
+        reply, output = self.execute_helper(code="%config undefined xxx")
+        self.assertEqual(reply['content']['status'], 'error')
+        self.assertEqual(output[0]['content']['ename'], repr(ValueError))
+
     def test_help(self):
         self.flush_channels()
-        reply, output_msgs = self.execute_helper(code='%help')
-        self.assertEqual(output_msgs[0]["header"]["msg_type"], "display_data")
+        reply, output = self.execute_helper(code='%help')
+        self.assertEqual(output[0]["header"]["msg_type"], "display_data")
         for command in ["help", "config", "load", "hf_home", "model_list", "new_chat"]:
             item = f"<tr><td style='text-align: left;'>{command}</td>"
-            self.assertIn(item, output_msgs[0]["content"]["data"]["text/markdown"])
+            self.assertIn(item, output[0]["content"]["data"]["text/markdown"])
 
-    def test_config_and_load(self):
+    def test_load(self):
         self.flush_channels()
         models = self._get_local_model_list()
         if not models:
             raise SkipTest("No local LLM is found")
 
-        self.execute_helper(code='%config temperature 0.8')
-        self.execute_helper(code='%config dtype float16')
-        reply, output_msgs = self.execute_helper(code=f'%load {models[0]}\nhi')
-        self.assertTrue(len(output_msgs[-1]["content"]["data"]["text/markdown"]) > 0)
+        reply, output = self.execute_helper(code=f'%load {models[0]}\nhi')
+        print(output)
+        self.assertEqual(reply['content']['status'], 'ok')
+        self.assertTrue(len(output[-1]["content"]["data"]["text/markdown"]) > 0)
 
 if __name__ == "__main__":
     unittest.main()

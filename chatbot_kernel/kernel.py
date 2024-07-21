@@ -40,10 +40,10 @@ class ChatbotKernelConfig:
         try:
             temp = float(temp)
             if temp < 0 or temp > 1:
-                raise ValueError("`temperature` must be a float between 0 and 1, but `{temp}` is got.")
+                raise ValueError
             self._temperature = temp
         except:
-            raise TypeError(f"`temperature` must be a float between 0 and 1, but `{temp}` is got.")
+            raise ValueError(f"`temperature` must be a float between 0 and 1, but `{temp}` is got.")
 
     @property
     def n_predict(self):
@@ -55,7 +55,7 @@ class ChatbotKernelConfig:
             n_pred = int(n_pred)
             self._n_predict = n_pred
         except:
-            raise TypeError(f"`n_predict` must be a integer, but `{n_pred}` is got.")
+            raise ValueError(f"`n_predict` must be a integer, but `{n_pred}` is got.")
 
     @property
     def n_new_tokens(self):
@@ -67,7 +67,7 @@ class ChatbotKernelConfig:
             n_tokens = int(n_tokens)
             self._n_new_tokens = n_tokens
         except:
-            raise TypeError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
+            raise ValueError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
 
 
 class ChatbotKernel(Kernel):
@@ -322,7 +322,7 @@ class ChatbotKernel(Kernel):
         ]
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
-            torch_dtype=self.dtype_mapping.get(self.chatbot_config.dtype),
+            torch_dtype=self.chatbot_config.dtype,
             device_map="auto",
             # local_files_only=True,
         )
