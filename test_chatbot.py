@@ -98,7 +98,6 @@ class ChatbotKernelTests(jkt.KernelTests):
             raise SkipTest("No local LLM is found")
 
         reply, output = self.execute_helper(code=f'%load {models[0]}\nhi')
-        print(output)
         self.assertEqual(reply['content']['status'], 'ok')
         self.assertTrue(len(output[-1]["content"]["data"]["text/markdown"]) > 0)
 
