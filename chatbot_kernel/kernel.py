@@ -5,6 +5,13 @@ from ipykernel.kernelbase import Kernel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 class ChatbotKernelConfig:
+    dtype_mapping = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+        "float64": torch.float64,
+    }
+
     def __init__(self):
         self._dtype = torch.bfloat16
         self._temperature = 0.6
@@ -21,15 +28,9 @@ class ChatbotKernelConfig:
 
     @dtype.setter
     def dtype(self, dtype_str):
-        dtype_mapping = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-            "float64": torch.float64,
-        }
-        if dtype_str not in dtype_mapping.keys():
-            raise ValueError(f"Invalid dtype. Choose one from {dtype_mapping.keys()}")
-        self._dtype = dtype_mapping.get(dtype_str)
+        if dtype_str not in self.dtype_mapping.keys():
+            raise ValueError(f"Invalid dtype. Choose one from {self.dtype_mapping.keys()}")
+        self._dtype = self.dtype_mapping.get(dtype_str)
 
     @property
     def temperature(self):
@@ -227,31 +228,45 @@ class ChatbotKernel(Kernel):
         help_options = {
             "help": "Show this option table",
             "temperature": "The creativity of LLMs. Default: 0.6",
-            "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16",
+            "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16. "
+                    f"Options: {', '.join(self.chatbot_config.dtype_mapping.keys())}",
             "n_predict": "The max number of token prediction. If -1, the response only stop when no more tokens are "
                          "generated. Default: 1000",
             "n_new_tokens": "The number of new tokens printed on the screen at one time. "\
-                            "`n_new_tokens` * `n_predict` will be the max length of one response. Default: 8"
+                            "`n_new_tokens` * `n_predict` will be the max length of one response. Default: 8",
+            "show": "Display the currect configurations",
         }
 
         config_key, *config_value = args
-        if config_key == "help":
-            help_message = "Usage: %config \<option\> \<value\>"
-            help_table_row = [
-                "<table style='border-collapse: collapse; width: 100%;'>",
-                "<colgroup><col style='width: 20%'><col style='width: 80%'></colgroup>",
-                "<tr><th>Options</th>",
-                "<th>Description</th></tr>",
+        if config_key in ["help", "show"]:
+            if config_key == "help":
+                column_label = "Description"
+                message = "Usage: %config \<option\> \<value\>"
+            else:
+                column_label = "Value"
+                message = ""
+
+            config_table_row = [
+                f"<table style='border-collapse: collapse; width: 100%;'>",
+                f"<colgroup><col style='width: 20%'><col style='width: 80%'></colgroup>",
+                f"<tr><th>Options</th>",
+                f"<th>{column_label}</th></tr>",
             ]
 
             for option, desc in help_options.items():
-                help_table_row.append(f"<tr><td style='text-align: left;'>{option}</td>")
-                help_table_row.append(f"<td style='text-align: left;'>{desc}</td></tr>")
+                if config_key == "help":
+                    value = desc
+                elif config_key == "show" and option not in ["help", "show"]:
+                    value = getattr(self.chatbot_config, option)
+                else:
+                    continue
+                config_table_row.append(f"<tr><td style='text-align: left;'>{option}</td>")
+                config_table_row.append(f"<td style='text-align: left;'>{value}</td></tr>")
 
-            help_table_row.append("</table>")
-            help_message = "\n".join([help_message, *help_table_row])
+            config_table_row.append("</table>")
+            message = "\n".join([message, *config_table_row])
             display_content = {
-                "data": {"text/markdown": help_message},
+                "data": {"text/markdown": message},
                 "metadata": {},
             }
             self.send_response(self.iopub_socket, "display_data", display_content)
