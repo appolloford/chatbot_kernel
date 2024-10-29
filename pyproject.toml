@@ -28,6 +28,7 @@ dependencies = [
     "transformers",
     # "sentencepiece",  # mistral models
     # "bitsandbytes",  # unsloth models
+    # "vllm", # vllm backend
 ]
 
 [project.optional-dependencies]
