@@ -60,8 +60,7 @@ class ChatbotKernelConfig:
                 raise ValueError
             self._tensor_parallel_size = tensor_parallel_size
         except:
-            raise ValueError(f"`tensor_parallel_size` must be a positive integer, "
-                             f"but `{tensor_parallel_size}` is got.")
+            raise ValueError(f"`tensor_parallel_size` must be a positive integer, but `{tensor_parallel_size}` is got.")
 
     @property
     def n_predict(self):
@@ -87,6 +86,7 @@ class ChatbotKernelConfig:
         except:
             raise ValueError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
 
+
 class ChatbotKernel(Kernel):
     implementation = "Chatbot"
     implementation_version = "0.1"
@@ -104,7 +104,16 @@ class ChatbotKernel(Kernel):
         self.model_id = None
         self.model = None
         self.conversation = []
-        self.cache_dir = os.getenv("HF_HOME", None)
+
+        # Get default cache_dir
+        default_home = os.path.join(os.path.expanduser("~"), ".cache")
+        HF_HOME = os.path.expanduser(
+            os.getenv(
+                "HF_HOME",
+                os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"),
+            )
+        )
+        self.cache_dir = HF_HOME
 
         self.chatbot_config = ChatbotKernelConfig()
         self.magic_commands = {
@@ -178,8 +187,8 @@ class ChatbotKernel(Kernel):
         """
         if self.model is None:
             raise ValueError(
-                "Model has not been initialized! Use `%load` to load a model before starting chat. "
-                "Check more options in `%help`"
+                "Model has not been initialized! Use `%load` to load a model before starting chat. Check more options"
+                " in `%help`"
             )
 
         if not silent:
@@ -187,29 +196,32 @@ class ChatbotKernel(Kernel):
             self.conversation.append({"role": "user", "content": [{"type": "text", "text": code}]})
             sampling_params = SamplingParams(
                 temperature=self.chatbot_config.temperature,
-                max_tokens = self.chatbot_config.n_new_tokens,
+                max_tokens=self.chatbot_config.n_new_tokens,
                 top_p=0.9,
             )
 
-            response = ''
+            response = ""
             count = 0
             n_predict = self.chatbot_config.n_predict
             while n_predict == -1 or count < n_predict:
                 count += 1
                 # Update assistant's response and request for new tokens to accomplish it
-                conversation = [*self.conversation, {"role": "assistant", "content": [{"type": "text", "text": response}]}]
+                conversation = [
+                    *self.conversation,
+                    {"role": "assistant", "content": [{"type": "text", "text": response}]},
+                ]
                 # Request new tokens until LLM stop generating
                 output = self.model.chat(
                     conversation,
                     sampling_params,
-                    use_tqdm = False,
+                    use_tqdm=False,
                     add_generation_prompt=False,
                     continue_final_message=True,
                 )
 
                 generated = output[0].outputs[0].text
                 generated = generated.lstrip("<|start_header_id|>assistant<|end_header_id|>")
-                response = ''.join([response, generated])
+                response = "".join([response, generated])
 
                 # Streaming output
                 stream_content = {"name": "stdout", "text": generated}
@@ -238,18 +250,26 @@ class ChatbotKernel(Kernel):
         Args:
             args (list): Target option and value
         """
+        dtype_options_str = ", ".join(self.chatbot_config.dtype_mapping.keys())
         help_options = {
             "help": "Show this option table",
             "show": "Display the currect configurations",
-            "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16. "
-                    f"Options: {', '.join(self.chatbot_config.dtype_mapping.keys())}",
-            "n_predict": "The max number of token prediction. If -1, the response only stop when no more tokens are "
-                         "generated. Default: 1000",
-            "n_new_tokens": "The number of new tokens printed on the screen at one time. "\
-                            "`n_new_tokens` * `n_predict` will be the max length of one response. Default: 8",
+            "dtype": (
+                f"The data type of LLMs. Model needs to be reloaded. Default: bfloat16. Options: {dtype_options_str}"
+            ),
+            "n_predict": (
+                "The max number of token prediction. If -1, the response only stop when no more tokens are generated."
+                " Default: 1000"
+            ),
+            "n_new_tokens": (
+                "The number of new tokens printed on the screen at one time. `n_new_tokens` * `n_predict` will be the"
+                " max length of one response. Default: 8"
+            ),
             "temperature": "The creativity of LLMs. Default: 0.6",
-            "tensor_parallel_size": "Number of tensor parallel replicas. Default to `SLURM_GPUS_ON_NODE` if the "
-                                    "environment variable is set, otherwise 1"
+            "tensor_parallel_size": (
+                "Number of tensor parallel replicas. Default to `SLURM_GPUS_ON_NODE` if the environment variable is"
+                " set, otherwise 1"
+            ),
         }
 
         config_key, *config_value = args
@@ -310,7 +330,7 @@ class ChatbotKernel(Kernel):
             action = self.magic_commands.get(magic_command).get("action")
             action(*magic_argv)
         else:
-            raise MagicError(f"Unknown magic keyword: {magic_command}. Please check `%help`")
+            raise ValueError(f"Unknown magic keyword: {magic_command}. Please check `%help`")
 
     def _handle_help_magic(self):
         """Handle `%help` magic command. Invoked by `_handle_magic`"""
@@ -345,6 +365,19 @@ class ChatbotKernel(Kernel):
         if self.model_id is None:
             raise ValueError("Model ID is not provided!")
 
+        try:
+            stream_content = {"name": "stdout", "text": f"Looking for local model: {self.model_id} ...\n"}
+            self.send_response(self.iopub_socket, "stream", stream_content)
+
+            model_base_path = os.path.join(self.cache_dir, "hub", "--".join(["models", *self.model_id.split("/")]))
+            snapshot = open(os.path.join(model_base_path, "refs", "main")).read()
+            model_path = os.path.join(model_base_path, "snapshots", snapshot)
+        except:
+            stream_content = {"name": "stdout", "text": f"Cannot find {self.model_id} in {self.cache_dir}. Try downloading ...\n"}
+            self.send_response(self.iopub_socket, "stream", stream_content)
+
+            model_path = self.model_id
+
         info = model_info(self.model_id)
         if "bitsandbytes" in info.tags:
             quantization = "bitsandbytes"
@@ -353,8 +386,11 @@ class ChatbotKernel(Kernel):
             quantization = None
             load_format = "auto"
 
+        stream_content = {"name": "stdout", "text": f"Loading {model_path} ...\n"}
+        self.send_response(self.iopub_socket, "stream", stream_content)
+
         self.model = LLM(
-            model=self.model_id,
+            model=model_path,
             dtype=self.chatbot_config.dtype,
             tensor_parallel_size=self.chatbot_config.tensor_parallel_size,
             quantization=quantization,
@@ -372,23 +408,16 @@ class ChatbotKernel(Kernel):
         Args:
             args (list): The target HF_HOME path. Only use the first position
         """
-        self.cache_dir = args[0]
+        if not args:
+            stream_content = {"name": "stdout", "text": f"HF_HOME = {self.cache_dir}"}
+            self.send_response(self.iopub_socket, "stream", stream_content)
+        else:
+            self.cache_dir = args[0]
 
     def _handle_model_list_magic(self):
         """Handle `%model_list` magic command. Invoked by `_handle_magic`"""
-        # Get default cache_dir
-        default_home = os.path.join(os.path.expanduser("~"), ".cache")
-        HF_HOME = os.path.expanduser(
-            os.getenv(
-                "HF_HOME",
-                os.path.join(os.getenv("XDG_CACHE_HOME", default_home), "huggingface"),
-            )
-        )
-
-        cache_dir = self.cache_dir or HF_HOME
-
         # Parse directories in the cache_dir
-        models = os.listdir(os.path.join(cache_dir, "hub"))
+        models = os.listdir(os.path.join(self.cache_dir, "hub"))
         output = "\n - ".join(["/".join(m.split("--")[1:]) for m in models if m.startswith("models")])
         output = f"Available models:\n - {output}"
         display_content = {"data": {"text/markdown": output}, "metadata": {}}
