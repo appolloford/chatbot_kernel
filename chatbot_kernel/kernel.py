@@ -1,8 +1,9 @@
 import os
 import traceback
 import torch
+from huggingface_hub import model_info
 from ipykernel.kernelbase import Kernel
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from vllm import LLM, SamplingParams
 
 class ChatbotKernelConfig:
     dtype_mapping = {
@@ -17,6 +18,7 @@ class ChatbotKernelConfig:
         self._temperature = 0.6
         self._n_predict = 1000
         self._n_new_tokens = 8
+        self._tensor_parallel_size = int(os.environ.get("SLURM_GPUS_ON_NODE", 1))
 
     @classmethod
     def _attributes(cls):
@@ -47,6 +49,21 @@ class ChatbotKernelConfig:
             raise ValueError(f"`temperature` must be a float between 0 and 1, but `{temp}` is got.")
 
     @property
+    def tensor_parallel_size(self):
+        return self._tensor_parallel_size
+
+    @tensor_parallel_size.setter
+    def tensor_parallel_size(self, tensor_parallel_size: str):
+        try:
+            tensor_parallel_size = int(tensor_parallel_size)
+            if tensor_parallel_size < 0:
+                raise ValueError
+            self._tensor_parallel_size = tensor_parallel_size
+        except:
+            raise ValueError(f"`tensor_parallel_size` must be a positive integer, "
+                             f"but `{tensor_parallel_size}` is got.")
+
+    @property
     def n_predict(self):
         return self._n_predict
 
@@ -69,7 +86,6 @@ class ChatbotKernelConfig:
             self._n_new_tokens = n_tokens
         except:
             raise ValueError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
-
 
 class ChatbotKernel(Kernel):
     implementation = "Chatbot"
@@ -168,45 +184,42 @@ class ChatbotKernel(Kernel):
 
         if not silent:
             # Append new user input into conversation
-            self.conversation.append({"role": "user", "content": code})
-            input_ids = self.tokenizer.apply_chat_template(
-                self.conversation, add_generation_prompt=True, return_tensors="pt"
-            ).to(self.model.device)
+            self.conversation.append({"role": "user", "content": [{"type": "text", "text": code}]})
+            sampling_params = SamplingParams(
+                temperature=self.chatbot_config.temperature,
+                max_tokens = self.chatbot_config.n_new_tokens,
+                top_p=0.9,
+            )
 
-            generated = input_ids
-            start = input_ids.shape[-1]
+            response = ''
             count = 0
             n_predict = self.chatbot_config.n_predict
             while n_predict == -1 or count < n_predict:
                 count += 1
+                # Update assistant's response and request for new tokens to accomplish it
+                conversation = [*self.conversation, {"role": "assistant", "content": [{"type": "text", "text": response}]}]
                 # Request new tokens until LLM stop generating
-                outputs = self.model.generate(
-                    generated,
-                    max_new_tokens=self.chatbot_config.n_new_tokens,
-                    eos_token_id=self.terminators,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    do_sample=True,
-                    # use_cache=True,
-                    temperature=self.chatbot_config.temperature,
-                    top_p=0.9,
+                output = self.model.chat(
+                    conversation,
+                    sampling_params,
+                    use_tqdm = False,
+                    add_generation_prompt=False,
+                    continue_final_message=True,
                 )
 
-                tokens = outputs[0][start:]
-                start += len(tokens)
-                generated = outputs
+                generated = output[0].outputs[0].text
+                generated = generated.lstrip("<|start_header_id|>assistant<|end_header_id|>")
+                response = ''.join([response, generated])
 
                 # Streaming output
-                tokens = self.tokenizer.decode(tokens, skip_special_tokens=True)
-                stream_content = {"name": "stdout", "text": tokens}
+                stream_content = {"name": "stdout", "text": generated}
                 self.send_response(self.iopub_socket, "stream", stream_content)
 
-                if outputs[0, -1] == self.tokenizer.eos_token_id:
+                if output[0].outputs[0].finish_reason == "stop":
                     break
 
         # Append the chatbot response into conversation
-        response = outputs[0][input_ids.shape[-1]:]
-        response = self.tokenizer.decode(response, skip_special_tokens=True)
-        self.conversation.append({"role": "assistant", "content": response})
+        self.conversation.append({"role": "assistant", "content": [{"type": "text", "text": response}]})
 
         # Clean the plain text stream output
         self.send_response(self.iopub_socket, "clear_output", {"wait": True})
@@ -227,14 +240,16 @@ class ChatbotKernel(Kernel):
         """
         help_options = {
             "help": "Show this option table",
-            "temperature": "The creativity of LLMs. Default: 0.6",
+            "show": "Display the currect configurations",
             "dtype": "The data type of LLMs. Model needs to be reloaded. Default: bfloat16. "
                     f"Options: {', '.join(self.chatbot_config.dtype_mapping.keys())}",
             "n_predict": "The max number of token prediction. If -1, the response only stop when no more tokens are "
                          "generated. Default: 1000",
             "n_new_tokens": "The number of new tokens printed on the screen at one time. "\
                             "`n_new_tokens` * `n_predict` will be the max length of one response. Default: 8",
-            "show": "Display the currect configurations",
+            "temperature": "The creativity of LLMs. Default: 0.6",
+            "tensor_parallel_size": "Number of tensor parallel replicas. Default to `SLURM_GPUS_ON_NODE` if the "
+                                    "environment variable is set, otherwise 1"
         }
 
         config_key, *config_value = args
@@ -330,16 +345,20 @@ class ChatbotKernel(Kernel):
         if self.model_id is None:
             raise ValueError("Model ID is not provided!")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-        self.terminators = [
-            self.tokenizer.eos_token_id,
-            self.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-        ]
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            torch_dtype=self.chatbot_config.dtype,
-            device_map="auto",
-            # local_files_only=True,
+        info = model_info(self.model_id)
+        if "bitsandbytes" in info.tags:
+            quantization = "bitsandbytes"
+            load_format = "bitsandbytes"
+        else:
+            quantization = None
+            load_format = "auto"
+
+        self.model = LLM(
+            model=self.model_id,
+            dtype=self.chatbot_config.dtype,
+            tensor_parallel_size=self.chatbot_config.tensor_parallel_size,
+            quantization=quantization,
+            load_format=load_format,
         )
 
     def _handle_new_chat_magic(self):

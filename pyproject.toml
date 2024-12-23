@@ -24,8 +24,9 @@ requires-python = ">=3.8"
 dependencies = [
     "ipykernel",
     "jupyter_client",
-    "accelerate",
-    "transformers",
+    "vllm",
+    # "accelerate",
+    # "transformers",
     # "sentencepiece",  # mistral models
     # "bitsandbytes",  # unsloth models
 ]
