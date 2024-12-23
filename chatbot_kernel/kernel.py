@@ -1,9 +1,10 @@
 import os
 import traceback
 import torch
-from huggingface_hub import model_info
+from transformers import AutoConfig
 from ipykernel.kernelbase import Kernel
 from vllm import LLM, SamplingParams
+
 
 class ChatbotKernelConfig:
     dtype_mapping = {
@@ -378,8 +379,9 @@ class ChatbotKernel(Kernel):
 
             model_path = self.model_id
 
-        info = model_info(self.model_id)
-        if "bitsandbytes" in info.tags:
+        config = AutoConfig.from_pretrained(model_path)
+        quantization_config = getattr(config, "quantization_config", None)
+        if "bitsandbytes" in str(quantization_config):
             quantization = "bitsandbytes"
             load_format = "bitsandbytes"
         else:
