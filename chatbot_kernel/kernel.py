@@ -3,6 +3,7 @@ import traceback
 import torch
 from transformers import AutoConfig
 from ipykernel.kernelbase import Kernel
+from urllib.parse import urlparse
 from vllm import LLM, SamplingParams
 
 
@@ -17,6 +18,7 @@ class ChatbotKernelConfig:
     def __init__(self):
         self._dtype = torch.bfloat16
         self._temperature = 0.6
+        self._n_images = 4
         self._n_predict = 1000
         self._n_new_tokens = 8
         self._tensor_parallel_size = int(os.environ.get("SLURM_GPUS_ON_NODE", 1))
@@ -34,6 +36,44 @@ class ChatbotKernelConfig:
         if dtype_str not in self.dtype_mapping.keys():
             raise ValueError(f"Invalid dtype. Choose one from {self.dtype_mapping.keys()}")
         self._dtype = self.dtype_mapping.get(dtype_str)
+
+    @property
+    def n_images(self):
+        return self._n_images
+
+    @n_images.setter
+    def n_images(self, n_images):
+        try:
+            n_images = int(n_images)
+            if n_images < 1:
+                raise ValueError
+            self._n_images = n_images
+        except:
+            raise ValueError(f"`n_images` must be a positive integer, but `{n_images}` is got.")
+
+    @property
+    def n_predict(self):
+        return self._n_predict
+
+    @n_predict.setter
+    def n_predict(self, n_pred):
+        try:
+            n_pred = int(n_pred)
+            self._n_predict = n_pred
+        except:
+            raise ValueError(f"`n_predict` must be a integer, but `{n_pred}` is got.")
+
+    @property
+    def n_new_tokens(self):
+        return self._n_new_tokens
+
+    @n_new_tokens.setter
+    def n_new_tokens(self, n_tokens):
+        try:
+            n_tokens = int(n_tokens)
+            self._n_new_tokens = n_tokens
+        except:
+            raise ValueError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
 
     @property
     def temperature(self):
@@ -63,30 +103,6 @@ class ChatbotKernelConfig:
         except:
             raise ValueError(f"`tensor_parallel_size` must be a positive integer, but `{tensor_parallel_size}` is got.")
 
-    @property
-    def n_predict(self):
-        return self._n_predict
-
-    @n_predict.setter
-    def n_predict(self, n_pred):
-        try:
-            n_pred = int(n_pred)
-            self._n_predict = n_pred
-        except:
-            raise ValueError(f"`n_predict` must be a integer, but `{n_pred}` is got.")
-
-    @property
-    def n_new_tokens(self):
-        return self._n_new_tokens
-
-    @n_new_tokens.setter
-    def n_new_tokens(self, n_tokens):
-        try:
-            n_tokens = int(n_tokens)
-            self._n_new_tokens = n_tokens
-        except:
-            raise ValueError(f"`n_new_tokens` must be a integer, but `{n_tokens}` is got.")
-
 
 class ChatbotKernel(Kernel):
     implementation = "Chatbot"
@@ -105,6 +121,7 @@ class ChatbotKernel(Kernel):
         self.model_id = None
         self.model = None
         self.conversation = []
+        self.images = []
 
         # Get default cache_dir
         default_home = os.path.join(os.path.expanduser("~"), ".cache")
@@ -121,6 +138,10 @@ class ChatbotKernel(Kernel):
             "help": {
                 "description": "Show this help message",
                 "action": self._handle_help_magic,
+            },
+            "image": {
+                "description": "The input images for multimodel models, provided by URL or local filepath",
+                "action": self._handle_image_magic,
             },
             "load": {
                 "description": "Load a pre-trained model to start chatting",
@@ -192,9 +213,21 @@ class ChatbotKernel(Kernel):
                 " in `%help`"
             )
 
+        config = AutoConfig.from_pretrained(self.model_id)
+        is_vision = getattr(config, "vision_config", None) is not None
+
+        # vision models do not support continue_final_message
+        continue_final_message = not is_vision
+
         if not silent:
             # Append new user input into conversation
-            self.conversation.append({"role": "user", "content": [{"type": "text", "text": code}]})
+            content = []
+            for image in self.images:
+                content.append({"type": "image_url", "image_url": {"url": image}})
+            content.append({"type": "text", "text": code})
+            self.images = []  # clean images once they have be saved in conversation
+            self.conversation.append({"role": "user", "content": content})
+
             sampling_params = SamplingParams(
                 temperature=self.chatbot_config.temperature,
                 max_tokens=self.chatbot_config.n_new_tokens,
@@ -217,7 +250,7 @@ class ChatbotKernel(Kernel):
                     sampling_params,
                     use_tqdm=False,
                     add_generation_prompt=False,
-                    continue_final_message=True,
+                    continue_final_message=continue_final_message,
                 )
 
                 generated = output[0].outputs[0].text
@@ -228,7 +261,8 @@ class ChatbotKernel(Kernel):
                 stream_content = {"name": "stdout", "text": generated}
                 self.send_response(self.iopub_socket, "stream", stream_content)
 
-                if output[0].outputs[0].finish_reason == "stop":
+                # vision models do not support continue_final_message, quit after one iteration
+                if output[0].outputs[0].finish_reason == "stop" or vision_config:
                     break
 
         # Append the chatbot response into conversation
@@ -258,6 +292,7 @@ class ChatbotKernel(Kernel):
             "dtype": (
                 f"The data type of LLMs. Model needs to be reloaded. Default: bfloat16. Options: {dtype_options_str}"
             ),
+            "n_images": "The max number of images to be handled by vision models. Default: 4",
             "n_predict": (
                 "The max number of token prediction. If -1, the response only stop when no more tokens are generated."
                 " Default: 1000"
@@ -317,6 +352,9 @@ class ChatbotKernel(Kernel):
         else:
             raise ValueError(f"Unknow config keyword: {config_key}")
 
+        if config_key in ["dtype", "n_images", "tensor_parallel_size"]:
+            self._load_model()
+
     def _handle_magic(self, code):
         """Handle magic commands. Invoked by `do_execute`
 
@@ -355,52 +393,50 @@ class ChatbotKernel(Kernel):
         }
         self.send_response(self.iopub_socket, "display_data", display_content)
 
+    def _handle_image_magic(self, *args):
+        """Handle `%image` magic command. Invoked by `_handle_magic`
+
+        Args:
+            args (list): The images to be loaded.
+        """
+        for image_url in args:
+            url_parsed = urlparse(image_url)
+            if url_parsed.scheme == "":
+                self.images.append("".join(["file://", url_parsed.path]))
+            else:
+                self.images.append(url_parsed.geturl())
+
     def _handle_load_magic(self, *args):
         """Handle `%load` magic command. Invoked by `_handle_magic`
 
         Args:
             args (list): The model to be loaded. Only use the first position
         """
-        self.model_id = args[0]
+        model_id = args[0]
 
-        if self.model_id is None:
+        if model_id is None:
             raise ValueError("Model ID is not provided!")
 
         try:
-            stream_content = {"name": "stdout", "text": f"Looking for local model: {self.model_id} ...\n"}
+            stream_content = {"name": "stdout", "text": f"Looking for local model: {model_id} ...\n"}
             self.send_response(self.iopub_socket, "stream", stream_content)
 
-            model_base_path = os.path.join(self.cache_dir, "hub", "--".join(["models", *self.model_id.split("/")]))
+            model_base_path = os.path.join(self.cache_dir, "hub", "--".join(["models", *model_id.split("/")]))
             snapshot = open(os.path.join(model_base_path, "refs", "main")).read()
-            model_path = os.path.join(model_base_path, "snapshots", snapshot)
+            self.model_id = os.path.join(model_base_path, "snapshots", snapshot)
         except:
             stream_content = {
                 "name": "stdout",
-                "text": f"Cannot find {self.model_id} in {self.cache_dir}. Try downloading ...\n",
+                "text": f"Cannot find {model_id} in {self.cache_dir}. Try downloading ...\n",
             }
             self.send_response(self.iopub_socket, "stream", stream_content)
 
-            model_path = self.model_id
+            self.model_id = model_id
 
-        config = AutoConfig.from_pretrained(model_path)
-        quantization_config = getattr(config, "quantization_config", None)
-        if "bitsandbytes" in str(quantization_config):
-            quantization = "bitsandbytes"
-            load_format = "bitsandbytes"
-        else:
-            quantization = None
-            load_format = "auto"
-
-        stream_content = {"name": "stdout", "text": f"Loading {model_path} ...\n"}
+        stream_content = {"name": "stdout", "text": f"Loading {self.model_id} ...\n"}
         self.send_response(self.iopub_socket, "stream", stream_content)
 
-        self.model = LLM(
-            model=model_path,
-            dtype=self.chatbot_config.dtype,
-            tensor_parallel_size=self.chatbot_config.tensor_parallel_size,
-            quantization=quantization,
-            load_format=load_format,
-        )
+        self._load_model()
 
     def _handle_new_chat_magic(self):
         """Handle `%new_chat` magic command. Invoked by `_handle_magic`"""
@@ -427,3 +463,54 @@ class ChatbotKernel(Kernel):
         output = f"Available models:\n - {output}"
         display_content = {"data": {"text/markdown": output}, "metadata": {}}
         self.send_response(self.iopub_socket, "display_data", display_content)
+
+    def _load_model(self):
+        """Instantiate a LLM class"""
+        # https://github.com/vllm-project/vllm/issues/9727
+        if self.model:
+            stream_content = {
+                "name": "stdout",
+                "text": f"A model has been loaded. Restarting kernel is needed to load another model\n",
+            }
+            self.send_response(self.iopub_socket, "stream", stream_content)
+            return
+
+        config = AutoConfig.from_pretrained(self.model_id)
+        quantization_config = getattr(config, "quantization_config", None)
+        if "bitsandbytes" in str(quantization_config):
+            quantization = "bitsandbytes"
+            load_format = "bitsandbytes"
+        else:
+            quantization = None
+            load_format = "auto"
+
+        vision_config = getattr(config, "vision_config", None)
+        if vision_config:
+            limit_mm_per_prompt = {"image": self.chatbot_config.n_images}
+            enforce_eager = True
+            max_model_len = 4096
+            max_num_seqs = 16
+
+            stream_content = {
+                "name": "stdout",
+                "text": f"Vision model cannot support streaming well. You have to set n_new_tokens to a large number\n",
+            }
+            self.send_response(self.iopub_socket, "stream", stream_content)
+        else:
+            limit_mm_per_prompt = None
+            enforce_eager = None
+            max_model_len = None
+            max_num_seqs = None
+
+        self.model = LLM(
+            model=self.model_id,
+            dtype=self.chatbot_config.dtype,
+            max_model_len=max_model_len,
+            max_num_seqs=max_num_seqs,
+            enforce_eager=enforce_eager,
+            tensor_parallel_size=self.chatbot_config.tensor_parallel_size,
+            limit_mm_per_prompt=limit_mm_per_prompt,
+            allowed_local_media_path=os.getenv("HOME"),
+            quantization=quantization,
+            load_format=load_format,
+        )
