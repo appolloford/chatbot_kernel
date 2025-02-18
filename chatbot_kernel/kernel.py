@@ -374,7 +374,10 @@ class ChatbotKernel(Kernel):
             snapshot = open(os.path.join(model_base_path, "refs", "main")).read()
             model_path = os.path.join(model_base_path, "snapshots", snapshot)
         except:
-            stream_content = {"name": "stdout", "text": f"Cannot find {self.model_id} in {self.cache_dir}. Try downloading ...\n"}
+            stream_content = {
+                "name": "stdout",
+                "text": f"Cannot find {self.model_id} in {self.cache_dir}. Try downloading ...\n",
+            }
             self.send_response(self.iopub_socket, "stream", stream_content)
 
             model_path = self.model_id

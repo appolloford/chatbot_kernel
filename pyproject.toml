@@ -1,6 +1,7 @@
 [build-system]
 requires = [
-    "hatchling>=1.10.0", "ipykernel"
+    "hatchling>=1.10.0",
+    "ipykernel",
 ]
 build-backend = "hatchling.build"
 
@@ -33,7 +34,11 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
-  "jupyter_kernel_test",
+    "jupyter_kernel_test",
+]
+dev = [
+    "black",
+    "pre-commit",
 ]
 
 [project.urls]
