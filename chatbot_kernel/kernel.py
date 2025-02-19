@@ -262,7 +262,7 @@ class ChatbotKernel(Kernel):
                 self.send_response(self.iopub_socket, "stream", stream_content)
 
                 # vision models do not support continue_final_message, quit after one iteration
-                if output[0].outputs[0].finish_reason == "stop" or vision_config:
+                if output[0].outputs[0].finish_reason == "stop" or is_vision:
                     break
 
         # Append the chatbot response into conversation
